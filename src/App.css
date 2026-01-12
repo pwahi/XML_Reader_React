@@ -191,6 +191,22 @@ button:not(:disabled):hover {
   border: 1px solid rgba(148, 163, 184, 0.25);
 }
 
+.toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
+.toggle input[type="checkbox"] {
+  width: 36px;
+  height: 20px;
+  accent-color: var(--accent-2);
+}
+
 .legend {
   display: grid;
   gap: 0.5rem;

@@ -27,6 +27,7 @@ function App() {
   const canvasRef = useRef(null);
   const modelGroupRef = useRef(new THREE.Group());
   const raycasterRef = useRef(new THREE.Raycaster());
+  const pickCycleRef = useRef({ key: "", index: 0, ids: [] });
 
   const [doc, setDoc] = useState(null);
   const [surfaces, setSurfaces] = useState([]);
@@ -34,6 +35,8 @@ function App() {
   const [pendingEdits, setPendingEdits] = useState(new Map());
   const [selectedId, setSelectedId] = useState(null);
   const [selectedLevel, setSelectedLevel] = useState("all");
+  const [xrayMode, setXrayMode] = useState(false);
+  const [hideExterior, setHideExterior] = useState(false);
   const [status, setStatus] = useState("No model");
   const [controls, setControls] = useState(null);
   const [camera, setCamera] = useState(null);
@@ -120,6 +123,11 @@ function App() {
     applyLevelFilter();
   }, [selectedLevel, surfaces]);
 
+  useEffect(() => {
+    updateSurfaceMaterials(meshesRef, xrayMode);
+    applyExteriorVisibility();
+  }, [xrayMode, hideExterior, surfaces]);
+
   const visibleSurfaces = useMemo(() => {
     if (selectedLevel === "all") return surfaces;
     return surfaces.filter((surface) => surface.levelIds.includes(selectedLevel));
@@ -184,11 +192,28 @@ function App() {
     const hits = raycaster.intersectObjects(meshes, true);
 
     if (hits.length) {
-      const hit = hits[0].object;
-      const root = hit.userData.surfaceId ? hit : hit.parent;
-      if (root && root.userData.surfaceId) {
-        selectSurface(root.userData.surfaceId);
+      const candidates = hits
+        .map((hit) => (hit.object.userData.surfaceId ? hit.object : hit.object.parent))
+        .filter((root) => root && root.userData.surfaceId)
+        .filter((root) => {
+          if (selectedLevel === "all") return true;
+          const surface = surfaces.find((item) => item.id === root.userData.surfaceId);
+          return surface ? surface.levelIds.includes(selectedLevel) : false;
+        });
+
+      if (!candidates.length) return;
+
+      const clickKey = `${Math.round(event.clientX)}:${Math.round(event.clientY)}:${selectedLevel}`;
+      const ids = candidates.map((root) => root.userData.surfaceId);
+
+      if (event.shiftKey && pickCycleRef.current.key === clickKey && sameIdList(pickCycleRef.current.ids, ids)) {
+        pickCycleRef.current.index = (pickCycleRef.current.index + 1) % ids.length;
+      } else {
+        pickCycleRef.current = { key: clickKey, index: 0, ids };
       }
+
+      const pickedId = ids[pickCycleRef.current.index];
+      selectSurface(pickedId);
     }
   };
 
@@ -241,16 +266,19 @@ function App() {
       const geometry = buildSurfaceGeometry(surface.points);
       if (!geometry) return;
 
+      const materialSettings = getMaterialSettings(surface.surfaceType, xrayMode);
       const material = new THREE.MeshStandardMaterial({
         color: getSurfaceColor(surface.surfaceType),
+        transparent: materialSettings.transparent,
+        opacity: materialSettings.opacity,
+        depthWrite: materialSettings.depthWrite,
         side: THREE.DoubleSide,
-        transparent: true,
-        opacity: 0.9,
         roughness: 0.45,
       });
 
       const mesh = new THREE.Mesh(geometry, material);
       mesh.userData.surfaceId = surface.id;
+      mesh.userData.surfaceType = surface.surfaceType;
       group.add(mesh);
 
       const edges = new THREE.LineSegments(
@@ -258,8 +286,10 @@ function App() {
         new THREE.LineBasicMaterial({ color: 0x1f2937 })
       );
       mesh.add(edges);
+      mesh.userData.edges = edges;
 
       meshesRef.current.set(surface.id, mesh);
+      setPickability(mesh, surface.surfaceType, xrayMode);
     });
 
     group.position.set(0, 0, 0);
@@ -280,17 +310,37 @@ function App() {
   };
 
   const applyLevelFilter = () => {
-    const visibleIds = new Set(visibleSurfaces.map((surface) => surface.id));
-    meshesRef.current.forEach((mesh, surfaceId) => {
-      mesh.visible = visibleIds.has(surfaceId);
-    });
+    updateVisibility();
 
     if (selectedId) {
       const selectedSurfaceMatch = surfaces.find((surface) => surface.id === selectedId);
-      if (!selectedSurfaceMatch || (selectedLevel !== "all" && !selectedSurfaceMatch.levelIds.includes(selectedLevel))) {
+      const selectedLevelMatch =
+        !selectedSurfaceMatch || selectedLevel === "all" || selectedSurfaceMatch.levelIds.includes(selectedLevel);
+      const selectedMesh = selectedSurfaceMatch ? meshesRef.current.get(selectedSurfaceMatch.id) : null;
+      const hidden = selectedMesh ? selectedMesh.userData.hiddenExterior === true : false;
+
+      if (!selectedSurfaceMatch || !selectedLevelMatch || hidden) {
         setSelectedId(null);
       }
     }
+  };
+
+  const applyExteriorVisibility = () => {
+    meshesRef.current.forEach((mesh) => {
+      const surfaceType = mesh.userData.surfaceType || "Unknown";
+      const exterior = isExteriorSurface(surfaceType);
+      mesh.userData.hiddenExterior = hideExterior && exterior;
+    });
+    updateVisibility();
+  };
+
+  const updateVisibility = () => {
+    const visibleIds = new Set(visibleSurfaces.map((surface) => surface.id));
+    meshesRef.current.forEach((mesh, surfaceId) => {
+      const allowedByLevel = visibleIds.has(surfaceId);
+      const hiddenExterior = mesh.userData.hiddenExterior === true;
+      mesh.visible = allowedByLevel && !hiddenExterior;
+    });
   };
 
   const statusClass = doc ? "badge" : "badge badge--idle";
@@ -338,6 +388,24 @@ function App() {
                 </option>
               ))}
             </select>
+          </div>
+          <div className="toggle">
+            <label htmlFor="xrayToggle">X-ray exterior</label>
+            <input
+              id="xrayToggle"
+              type="checkbox"
+              checked={xrayMode}
+              onChange={(event) => setXrayMode(event.target.checked)}
+            />
+          </div>
+          <div className="toggle">
+            <label htmlFor="hideExteriorToggle">Hide exterior</label>
+            <input
+              id="hideExteriorToggle"
+              type="checkbox"
+              checked={hideExterior}
+              onChange={(event) => setHideExterior(event.target.checked)}
+            />
           </div>
         </div>
 
@@ -664,6 +732,46 @@ function getSurfaceColor(type) {
   return typeColors[type] || typeColors.Unknown;
 }
 
+function getMaterialSettings(surfaceType, xrayMode) {
+  if (!xrayMode) {
+    return { opacity: 0.9, transparent: true, depthWrite: true };
+  }
+
+  const isExterior = surfaceType === "ExteriorWall" || surfaceType === "Roof" || surfaceType === "ExteriorFloor";
+  if (isExterior) {
+    return { opacity: 0.2, transparent: true, depthWrite: false };
+  }
+
+  return { opacity: 0.9, transparent: true, depthWrite: true };
+}
+
+function isExteriorSurface(surfaceType) {
+  return surfaceType === "ExteriorWall" || surfaceType === "Roof" || surfaceType === "ExteriorFloor";
+}
+
+function setPickability(mesh, surfaceType, xrayMode) {
+  const pickable = !xrayMode || !isExteriorSurface(surfaceType);
+  mesh.userData.pickable = pickable;
+  mesh.raycast = pickable ? THREE.Mesh.prototype.raycast : () => null;
+
+  const edges = mesh.userData.edges;
+  if (edges) {
+    edges.raycast = pickable ? THREE.LineSegments.prototype.raycast : () => null;
+  }
+}
+
+function updateSurfaceMaterials(meshesRef, xrayMode) {
+  meshesRef.current.forEach((mesh) => {
+    const surfaceType = mesh.userData.surfaceType || "Unknown";
+    const settings = getMaterialSettings(surfaceType, xrayMode);
+    mesh.material.transparent = settings.transparent;
+    mesh.material.opacity = settings.opacity;
+    mesh.material.depthWrite = settings.depthWrite;
+    mesh.material.needsUpdate = true;
+    setPickability(mesh, surfaceType, xrayMode);
+  });
+}
+
 function getLevelDisplayName(levels, levelId) {
   const level = levels.find((item) => item.id === levelId);
   return level ? level.displayName || level.name : levelId;
@@ -671,6 +779,14 @@ function getLevelDisplayName(levels, levelId) {
 
 function toHex(color) {
   return `#${color.toString(16).padStart(6, "0")}`;
+}
+
+function sameIdList(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
 }
 
 export default App;
