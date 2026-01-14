@@ -10,6 +10,10 @@ A Vite + React version of the GBXML viewer that runs fully client-side and bundl
 3. Build for production:
    - `npm run build`
 
+## One-click scripts (Windows)
+- Start the app: `start-app.bat`
+- Stop the app: `stop-app.bat`
+
 ## Features
 - Load a GBXML file from your computer
 - 3D view with orbit controls and surface selection
