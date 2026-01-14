@@ -20,8 +20,11 @@ const typeColors = {
 };
 
 const surfaceTypeOptions = Object.keys(typeColors).filter((key) => key !== "Unknown");
+const openingTypeOptions = ["FixedWindow", "OperableWindow", "Door", "Skylight", "Air", "Unknown"];
+const openingTint = 0x6ecff6;
 
-const emptyDetails = { id: "", area: 0, zoneNames: [], levelIds: [], surfaceType: "Unknown" };
+const emptySurface = { id: "", area: 0, zoneNames: [], levelIds: [], surfaceType: "Unknown" };
+const emptyOpening = { id: "", area: 0, openingType: "Unknown", levelIds: [], parentSurfaceId: "" };
 
 function App() {
   const canvasRef = useRef(null);
@@ -31,22 +34,31 @@ function App() {
 
   const [doc, setDoc] = useState(null);
   const [surfaces, setSurfaces] = useState([]);
+  const [openings, setOpenings] = useState([]);
   const [levels, setLevels] = useState([]);
   const [pendingEdits, setPendingEdits] = useState(new Map());
   const [selectedId, setSelectedId] = useState(null);
+  const [selectedKind, setSelectedKind] = useState("surface");
   const [selectedLevel, setSelectedLevel] = useState("all");
   const [xrayMode, setXrayMode] = useState(false);
   const [hideExterior, setHideExterior] = useState(false);
+  const [showOpenings, setShowOpenings] = useState(true);
   const [status, setStatus] = useState("No model");
   const [controls, setControls] = useState(null);
   const [camera, setCamera] = useState(null);
   const [renderer, setRenderer] = useState(null);
 
   const meshesRef = useRef(new Map());
+  const openingMeshesRef = useRef(new Map());
 
   const selectedSurface = useMemo(
-    () => surfaces.find((surface) => surface.id === selectedId) || emptyDetails,
+    () => surfaces.find((surface) => surface.id === selectedId) || emptySurface,
     [surfaces, selectedId]
+  );
+
+  const selectedOpening = useMemo(
+    () => openings.find((opening) => opening.id === selectedId) || emptyOpening,
+    [openings, selectedId]
   );
 
   useEffect(() => {
@@ -117,7 +129,7 @@ function App() {
 
   useEffect(() => {
     rebuildScene();
-  }, [surfaces, camera, controls]);
+  }, [surfaces, openings, camera, controls]);
 
   useEffect(() => {
     applyLevelFilter();
@@ -125,13 +137,19 @@ function App() {
 
   useEffect(() => {
     updateSurfaceMaterials(meshesRef, xrayMode);
+    updateOpeningMaterials(openingMeshesRef);
     applyExteriorVisibility();
-  }, [xrayMode, hideExterior, surfaces]);
+  }, [xrayMode, hideExterior, surfaces, openings, showOpenings]);
 
   const visibleSurfaces = useMemo(() => {
     if (selectedLevel === "all") return surfaces;
     return surfaces.filter((surface) => surface.levelIds.includes(selectedLevel));
   }, [surfaces, selectedLevel]);
+
+  const visibleOpenings = useMemo(() => {
+    if (selectedLevel === "all") return openings;
+    return openings.filter((opening) => opening.levelIds.includes(selectedLevel));
+  }, [openings, selectedLevel]);
 
   const pendingCount = pendingEdits.size;
 
@@ -143,13 +161,15 @@ function App() {
     reader.onload = () => {
       try {
         const text = reader.result;
-        const { doc: parsedDoc, surfaces: parsedSurfaces, levels: parsedLevels } = parseGbxml(text);
+        const { doc: parsedDoc, surfaces: parsedSurfaces, levels: parsedLevels, openings: parsedOpenings } = parseGbxml(text);
         setDoc(parsedDoc);
         setSurfaces(parsedSurfaces);
+        setOpenings(parsedOpenings);
         setLevels(parsedLevels);
         setPendingEdits(new Map());
         setSelectedLevel("all");
         setSelectedId(null);
+        setSelectedKind("surface");
         setStatus(`Loaded ${parsedSurfaces.length} surfaces`);
       } catch (error) {
         console.error(error);
@@ -159,20 +179,45 @@ function App() {
     reader.readAsText(file);
   };
 
+  const clearSelectionHighlight = () => {
+    if (selectedKind === "surface" && selectedId && meshesRef.current.has(selectedId)) {
+      const prevMesh = meshesRef.current.get(selectedId);
+      prevMesh.material.emissive?.setHex(0x000000);
+    }
+    if (selectedKind === "opening" && selectedId && openingMeshesRef.current.has(selectedId)) {
+      const prevMesh = openingMeshesRef.current.get(selectedId);
+      prevMesh.material.emissive?.setHex(0x000000);
+    }
+  };
+
   const selectSurface = (surfaceId) => {
     if (!surfaceId) return;
     const surface = surfaces.find((item) => item.id === surfaceId);
     if (!surface) return;
     if (selectedLevel !== "all" && !surface.levelIds.includes(selectedLevel)) return;
 
-    if (selectedId && meshesRef.current.has(selectedId)) {
-      const prevMesh = meshesRef.current.get(selectedId);
-      prevMesh.material.emissive?.setHex(0x000000);
-    }
-
+    clearSelectionHighlight();
+    setSelectedKind("surface");
     setSelectedId(surfaceId);
 
     const mesh = meshesRef.current.get(surfaceId);
+    if (mesh) {
+      mesh.material.emissive = new THREE.Color(0x1f2937);
+    }
+  };
+
+  const selectOpening = (openingId) => {
+    if (!openingId) return;
+    const opening = openings.find((item) => item.id === openingId);
+    if (!opening) return;
+    if (selectedLevel !== "all" && !opening.levelIds.includes(selectedLevel)) return;
+    if (!showOpenings) return;
+
+    clearSelectionHighlight();
+    setSelectedKind("opening");
+    setSelectedId(openingId);
+
+    const mesh = openingMeshesRef.current.get(openingId);
     if (mesh) {
       mesh.material.emissive = new THREE.Color(0x1f2937);
     }
@@ -188,23 +233,45 @@ function App() {
 
     const raycaster = raycasterRef.current;
     raycaster.setFromCamera(mouse, camera);
-    const meshes = Array.from(meshesRef.current.values());
-    const hits = raycaster.intersectObjects(meshes, true);
+    const meshes = [
+      ...Array.from(meshesRef.current.values()),
+      ...(showOpenings ? Array.from(openingMeshesRef.current.values()) : []),
+    ];
+    const hits = raycaster.intersectObjects(meshes, false);
 
     if (hits.length) {
+      // Prefer an internal floor when clicking from above.
+      if (!event.shiftKey) {
+        const floorHit = hits.find((hit) => {
+          if (!hit.object?.userData?.surfaceId) return false;
+          const surface = surfaces.find((item) => item.id === hit.object.userData.surfaceId);
+          return surface ? surface.surfaceType === "InteriorFloor" : false;
+        });
+        if (floorHit) {
+          selectSurface(floorHit.object.userData.surfaceId);
+          return;
+        }
+      }
+
       const candidates = hits
-        .map((hit) => (hit.object.userData.surfaceId ? hit.object : hit.object.parent))
-        .filter((root) => root && root.userData.surfaceId)
+        .map((hit) => hit.object)
+        .filter(Boolean)
         .filter((root) => {
           if (selectedLevel === "all") return true;
-          const surface = surfaces.find((item) => item.id === root.userData.surfaceId);
-          return surface ? surface.levelIds.includes(selectedLevel) : false;
+          const surface = root.userData.surfaceId
+            ? surfaces.find((item) => item.id === root.userData.surfaceId)
+            : null;
+          const opening = root.userData.openingId
+            ? openings.find((item) => item.id === root.userData.openingId)
+            : null;
+          const levelIds = surface ? surface.levelIds : opening ? opening.levelIds : [];
+          return levelIds.includes(selectedLevel);
         });
 
       if (!candidates.length) return;
 
       const clickKey = `${Math.round(event.clientX)}:${Math.round(event.clientY)}:${selectedLevel}`;
-      const ids = candidates.map((root) => root.userData.surfaceId);
+      const ids = candidates.map((root) => root.userData.surfaceId || root.userData.openingId);
 
       if (event.shiftKey && pickCycleRef.current.key === clickKey && sameIdList(pickCycleRef.current.ids, ids)) {
         pickCycleRef.current.index = (pickCycleRef.current.index + 1) % ids.length;
@@ -212,8 +279,12 @@ function App() {
         pickCycleRef.current = { key: clickKey, index: 0, ids };
       }
 
-      const pickedId = ids[pickCycleRef.current.index];
-      selectSurface(pickedId);
+      const pickedRoot = candidates[pickCycleRef.current.index];
+      if (pickedRoot.userData.surfaceId) {
+        selectSurface(pickedRoot.userData.surfaceId);
+      } else if (pickedRoot.userData.openingId) {
+        selectOpening(pickedRoot.userData.openingId);
+      }
     }
   };
 
@@ -222,7 +293,17 @@ function App() {
     if (!selectedSurface?.id) return;
     setPendingEdits((prev) => {
       const next = new Map(prev);
-      next.set(selectedSurface.id, nextType);
+      next.set(`surface:${selectedSurface.id}`, nextType);
+      return next;
+    });
+  };
+
+  const handleOpeningTypeChange = (event) => {
+    const nextType = event.target.value;
+    if (!selectedOpening?.id) return;
+    setPendingEdits((prev) => {
+      const next = new Map(prev);
+      next.set(`opening:${selectedOpening.id}`, nextType);
       return next;
     });
   };
@@ -230,15 +311,25 @@ function App() {
   const applyPendingEdits = () => {
     if (!doc || pendingEdits.size === 0) return;
     const updatedSurfaces = surfaces.map((surface) => {
-      if (!pendingEdits.has(surface.id)) return surface;
-      const newType = pendingEdits.get(surface.id);
+      const key = `surface:${surface.id}`;
+      if (!pendingEdits.has(key)) return surface;
+      const newType = pendingEdits.get(key);
       surface.element.setAttribute("surfaceType", newType);
       if (meshesRef.current.has(surface.id)) {
         meshesRef.current.get(surface.id).material.color.setHex(getSurfaceColor(newType));
       }
       return { ...surface, surfaceType: newType };
     });
+
+    const updatedOpenings = openings.map((opening) => {
+      const key = `opening:${opening.id}`;
+      if (!pendingEdits.has(key)) return opening;
+      const newType = pendingEdits.get(key);
+      opening.element.setAttribute("openingType", newType);
+      return { ...opening, openingType: newType };
+    });
     setSurfaces(updatedSurfaces);
+    setOpenings(updatedOpenings);
     setPendingEdits(new Map());
     setStatus("Model updated");
   };
@@ -260,6 +351,7 @@ function App() {
     const group = modelGroupRef.current;
     group.clear();
     meshesRef.current.clear();
+    openingMeshesRef.current.clear();
 
     surfaces.forEach((surface) => {
       if (!surface.points.length) return;
@@ -285,11 +377,46 @@ function App() {
         new THREE.EdgesGeometry(geometry),
         new THREE.LineBasicMaterial({ color: 0x1f2937 })
       );
+      edges.raycast = () => null;
       mesh.add(edges);
       mesh.userData.edges = edges;
 
       meshesRef.current.set(surface.id, mesh);
-      setPickability(mesh, surface.surfaceType, xrayMode);
+      setPickability(mesh);
+    });
+
+    openings.forEach((opening) => {
+      if (!opening.points.length) return;
+      const geometry = buildSurfaceGeometry(opening.points);
+      if (!geometry) return;
+
+      const material = new THREE.MeshStandardMaterial({
+        color: openingTint,
+        side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.45,
+        roughness: 0.15,
+        depthWrite: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1,
+      });
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.userData.openingId = opening.id;
+      mesh.userData.kind = "opening";
+      mesh.renderOrder = 2;
+      modelGroupRef.current.add(mesh);
+
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry),
+        new THREE.LineBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.7 })
+      );
+      edges.raycast = () => null;
+      edges.renderOrder = 3;
+      mesh.add(edges);
+
+      openingMeshesRef.current.set(opening.id, mesh);
     });
 
     group.position.set(0, 0, 0);
@@ -313,14 +440,24 @@ function App() {
     updateVisibility();
 
     if (selectedId) {
-      const selectedSurfaceMatch = surfaces.find((surface) => surface.id === selectedId);
-      const selectedLevelMatch =
-        !selectedSurfaceMatch || selectedLevel === "all" || selectedSurfaceMatch.levelIds.includes(selectedLevel);
-      const selectedMesh = selectedSurfaceMatch ? meshesRef.current.get(selectedSurfaceMatch.id) : null;
-      const hidden = selectedMesh ? selectedMesh.userData.hiddenExterior === true : false;
+      if (selectedKind === "surface") {
+        const selectedSurfaceMatch = surfaces.find((surface) => surface.id === selectedId);
+        const selectedLevelMatch =
+          !selectedSurfaceMatch || selectedLevel === "all" || selectedSurfaceMatch.levelIds.includes(selectedLevel);
+        const selectedMesh = selectedSurfaceMatch ? meshesRef.current.get(selectedSurfaceMatch.id) : null;
+        const hidden = selectedMesh ? selectedMesh.userData.hiddenExterior === true : false;
 
-      if (!selectedSurfaceMatch || !selectedLevelMatch || hidden) {
-        setSelectedId(null);
+        if (!selectedSurfaceMatch || !selectedLevelMatch || hidden) {
+          setSelectedId(null);
+        }
+      } else if (selectedKind === "opening") {
+        const selectedOpeningMatch = openings.find((opening) => opening.id === selectedId);
+        const selectedLevelMatch =
+          !selectedOpeningMatch || selectedLevel === "all" || selectedOpeningMatch.levelIds.includes(selectedLevel);
+
+        if (!selectedOpeningMatch || !selectedLevelMatch || !showOpenings) {
+          setSelectedId(null);
+        }
       }
     }
   };
@@ -340,6 +477,12 @@ function App() {
       const allowedByLevel = visibleIds.has(surfaceId);
       const hiddenExterior = mesh.userData.hiddenExterior === true;
       mesh.visible = allowedByLevel && !hiddenExterior;
+    });
+
+    const visibleOpeningIds = new Set(visibleOpenings.map((opening) => opening.id));
+    openingMeshesRef.current.forEach((mesh, openingId) => {
+      const allowedByLevel = visibleOpeningIds.has(openingId);
+      mesh.visible = showOpenings && allowedByLevel;
     });
   };
 
@@ -407,12 +550,21 @@ function App() {
               onChange={(event) => setHideExterior(event.target.checked)}
             />
           </div>
+          <div className="toggle">
+            <label htmlFor="openingsToggle">Show openings</label>
+            <input
+              id="openingsToggle"
+              type="checkbox"
+              checked={showOpenings}
+              onChange={(event) => setShowOpenings(event.target.checked)}
+            />
+          </div>
         </div>
 
         <div className="panel__section">
-          <h2>Selected Surface</h2>
+          <h2>Selected Item</h2>
           <div className="surface">
-            {selectedSurface?.id ? (
+            {selectedId && selectedKind === "surface" ? (
               <>
                 <div>
                   <label>Surface ID</label>
@@ -437,7 +589,7 @@ function App() {
                 <div>
                   <label>Surface Type</label>
                   <select
-                    value={pendingEdits.get(selectedSurface.id) || selectedSurface.surfaceType}
+                    value={pendingEdits.get(`surface:${selectedSurface.id}`) || selectedSurface.surfaceType}
                     onChange={handleSurfaceTypeChange}
                   >
                     {surfaceTypeOptions.map((type) => (
@@ -448,8 +600,44 @@ function App() {
                   </select>
                 </div>
               </>
+            ) : selectedId && selectedKind === "opening" ? (
+              <>
+                <div>
+                  <label>Opening ID</label>
+                  <div>{selectedOpening.id || "Unknown"}</div>
+                </div>
+                <div>
+                  <label>Opening Area</label>
+                  <div>{selectedOpening.area ? selectedOpening.area.toFixed(2) : "0.00"}</div>
+                </div>
+                <div>
+                  <label>Level</label>
+                  <div>
+                    {selectedOpening.levelIds.length
+                      ? selectedOpening.levelIds.map((levelId) => getLevelDisplayName(levels, levelId)).join(", ")
+                      : "Unknown"}
+                  </div>
+                </div>
+                <div>
+                  <label>Parent Surface</label>
+                  <div>{selectedOpening.parentSurfaceId || "Unknown"}</div>
+                </div>
+                <div>
+                  <label>Opening Type</label>
+                  <select
+                    value={pendingEdits.get(`opening:${selectedOpening.id}`) || selectedOpening.openingType}
+                    onChange={handleOpeningTypeChange}
+                  >
+                    {openingTypeOptions.map((type) => (
+                      <option key={type} value={type}>
+                        {type}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </>
             ) : (
-              <div className="placeholder">Click a surface to see its details.</div>
+              <div className="placeholder">Click a surface or opening to see details.</div>
             )}
           </div>
         </div>
@@ -460,7 +648,7 @@ function App() {
             {visibleSurfaces.map((surface) => (
               <button
                 key={surface.id}
-                className={surface.id === selectedId ? "active" : ""}
+                className={surface.id === selectedId && selectedKind === "surface" ? "active" : ""}
                 onClick={() => selectSurface(surface.id)}
               >
                 {surface.id || "Surface"} - {surface.surfaceType}
@@ -482,6 +670,10 @@ function App() {
                 <span>{type}</span>
               </div>
             ))}
+            <div className="legend__item">
+              <span className="legend__swatch" style={{ background: toHex(openingTint) }}></span>
+              <span>Openings</span>
+            </div>
           </div>
         </div>
         <div className="hint">Drag to orbit ? Scroll to zoom ? Click to select</div>
@@ -532,6 +724,8 @@ function parseGbxml(text) {
     spaceMap.set(id, { name, zoneId, storeyId });
   });
 
+  const openings = [];
+
   const surfaces = Array.from(doc.getElementsByTagNameNS("*", "Surface")).map((surface, index) => {
     const id = surface.getAttribute("id") || `surface-${index + 1}`;
     const surfaceType = surface.getAttribute("surfaceType") || "Unknown";
@@ -568,7 +762,7 @@ function parseGbxml(text) {
       })
       .filter(Boolean);
 
-    return {
+    const surfaceEntry = {
       id,
       element: surface,
       surfaceType,
@@ -579,12 +773,37 @@ function parseGbxml(text) {
       levelIds,
       levelNames,
     };
+
+    const openingNodes = [
+      ...Array.from(surface.getElementsByTagNameNS("*", "Opening")),
+      ...Array.from(surface.getElementsByTagNameNS("*", "Aperture")),
+    ];
+
+    openingNodes.forEach((opening, openingIndex) => {
+      const openingId = opening.getAttribute("id") || `${id}-opening-${openingIndex + 1}`;
+      const openingType = opening.getAttribute("openingType") || opening.getAttribute("type") || "Unknown";
+      const openingLoop = getFirstChild(opening, "PolyLoop");
+      const openingPoints = openingLoop ? parsePoints(openingLoop) : [];
+      const openingArea = computeArea(openingPoints);
+
+      openings.push({
+        id: openingId,
+        element: opening,
+        openingType,
+        points: openingPoints,
+        area: openingArea,
+        levelIds: [...levelIds],
+        parentSurfaceId: id,
+      });
+    });
+
+    return surfaceEntry;
   });
 
   const levels = buildLevels(storeyMap, surfaces);
   assignFallbackLevels(levels, surfaces);
 
-  return { doc, surfaces, levels };
+  return { doc, surfaces, levels, openings };
 }
 
 function findText(root, names) {
@@ -749,14 +968,13 @@ function isExteriorSurface(surfaceType) {
   return surfaceType === "ExteriorWall" || surfaceType === "Roof" || surfaceType === "ExteriorFloor";
 }
 
-function setPickability(mesh, surfaceType, xrayMode) {
-  const pickable = !xrayMode || !isExteriorSurface(surfaceType);
-  mesh.userData.pickable = pickable;
-  mesh.raycast = pickable ? THREE.Mesh.prototype.raycast : () => null;
+function setPickability(mesh) {
+  mesh.userData.pickable = true;
+  mesh.raycast = THREE.Mesh.prototype.raycast;
 
   const edges = mesh.userData.edges;
   if (edges) {
-    edges.raycast = pickable ? THREE.LineSegments.prototype.raycast : () => null;
+    edges.raycast = () => null;
   }
 }
 
@@ -768,7 +986,19 @@ function updateSurfaceMaterials(meshesRef, xrayMode) {
     mesh.material.opacity = settings.opacity;
     mesh.material.depthWrite = settings.depthWrite;
     mesh.material.needsUpdate = true;
-    setPickability(mesh, surfaceType, xrayMode);
+    setPickability(mesh);
+  });
+}
+
+function updateOpeningMaterials(openingMeshesRef) {
+  openingMeshesRef.current.forEach((mesh) => {
+    mesh.material.transparent = true;
+    mesh.material.opacity = 0.45;
+    mesh.material.depthWrite = false;
+    mesh.material.polygonOffset = true;
+    mesh.material.polygonOffsetFactor = -1;
+    mesh.material.polygonOffsetUnits = -1;
+    mesh.material.needsUpdate = true;
   });
 }
 
