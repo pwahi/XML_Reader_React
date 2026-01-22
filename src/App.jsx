@@ -334,6 +334,33 @@ function App() {
     setStatus("Model updated");
   };
 
+  const deleteSelectedSurface = () => {
+    if (!selectedSurface?.id) return;
+    const confirmed = window.confirm(`Delete surface ${selectedSurface.id}? This will remove its openings too.`);
+    if (!confirmed) return;
+
+    clearSelectionHighlight();
+    if (selectedSurface.element?.parentNode) {
+      selectedSurface.element.parentNode.removeChild(selectedSurface.element);
+    }
+
+    const openingIdsToRemove = new Set(
+      openings.filter((opening) => opening.parentSurfaceId === selectedSurface.id).map((opening) => opening.id)
+    );
+
+    setSurfaces((prev) => prev.filter((surface) => surface.id !== selectedSurface.id));
+    setOpenings((prev) => prev.filter((opening) => opening.parentSurfaceId !== selectedSurface.id));
+    setPendingEdits((prev) => {
+      const next = new Map(prev);
+      next.delete(`surface:${selectedSurface.id}`);
+      openingIdsToRemove.forEach((openingId) => next.delete(`opening:${openingId}`));
+      return next;
+    });
+    setSelectedId(null);
+    setSelectedKind("surface");
+    setStatus(`Deleted surface ${selectedSurface.id}`);
+  };
+
   const downloadGbxml = () => {
     if (!doc) return;
     const serializer = new XMLSerializer();
@@ -599,6 +626,9 @@ function App() {
                     ))}
                   </select>
                 </div>
+                <button className="danger" onClick={deleteSelectedSurface}>
+                  Delete Surface
+                </button>
               </>
             ) : selectedId && selectedKind === "opening" ? (
               <>
