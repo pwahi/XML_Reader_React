@@ -136,6 +136,12 @@ button.primary {
   color: #111827;
 }
 
+button.secondary {
+  background: rgba(42, 157, 143, 0.2);
+  border: 1px solid rgba(42, 157, 143, 0.45);
+  color: #bff4ea;
+}
+
 button.danger {
   background: rgba(231, 111, 81, 0.2);
   border: 1px solid rgba(231, 111, 81, 0.45);
@@ -195,6 +201,13 @@ button:not(:disabled):hover {
   background: rgba(15, 23, 42, 0.85);
   color: var(--text);
   border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.surface__split {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 0.5rem;
 }
 
 .toggle {

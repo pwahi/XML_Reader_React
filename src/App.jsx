@@ -39,6 +39,7 @@ function App() {
   const [pendingEdits, setPendingEdits] = useState(new Map());
   const [selectedId, setSelectedId] = useState(null);
   const [selectedKind, setSelectedKind] = useState("surface");
+  const [newOpeningType, setNewOpeningType] = useState("FixedWindow");
   const [selectedLevel, setSelectedLevel] = useState("all");
   const [xrayMode, setXrayMode] = useState(false);
   const [hideExterior, setHideExterior] = useState(false);
@@ -310,10 +311,18 @@ function App() {
 
   const applyPendingEdits = () => {
     if (!doc || pendingEdits.size === 0) return;
-    const updatedSurfaces = surfaces.map((surface) => {
+    const { updatedSurfaces, updatedOpenings } = applyEditsToModel(surfaces, openings, pendingEdits);
+    setSurfaces(updatedSurfaces);
+    setOpenings(updatedOpenings);
+    setPendingEdits(new Map());
+    setStatus("Model updated");
+  };
+
+  const applyEditsToModel = (sourceSurfaces, sourceOpenings, edits) => {
+    const updatedSurfaces = sourceSurfaces.map((surface) => {
       const key = `surface:${surface.id}`;
-      if (!pendingEdits.has(key)) return surface;
-      const newType = pendingEdits.get(key);
+      if (!edits.has(key)) return surface;
+      const newType = edits.get(key);
       surface.element.setAttribute("surfaceType", newType);
       if (meshesRef.current.has(surface.id)) {
         meshesRef.current.get(surface.id).material.color.setHex(getSurfaceColor(newType));
@@ -321,17 +330,15 @@ function App() {
       return { ...surface, surfaceType: newType };
     });
 
-    const updatedOpenings = openings.map((opening) => {
+    const updatedOpenings = sourceOpenings.map((opening) => {
       const key = `opening:${opening.id}`;
-      if (!pendingEdits.has(key)) return opening;
-      const newType = pendingEdits.get(key);
+      if (!edits.has(key)) return opening;
+      const newType = edits.get(key);
       opening.element.setAttribute("openingType", newType);
       return { ...opening, openingType: newType };
     });
-    setSurfaces(updatedSurfaces);
-    setOpenings(updatedOpenings);
-    setPendingEdits(new Map());
-    setStatus("Model updated");
+
+    return { updatedSurfaces, updatedOpenings };
   };
 
   const deleteSelectedSurface = () => {
@@ -361,8 +368,65 @@ function App() {
     setStatus(`Deleted surface ${selectedSurface.id}`);
   };
 
+  const convertSelectedSurfaceToOpening = () => {
+    if (!doc || !selectedSurface?.id || !selectedSurface.element || selectedSurface.points.length < 3) return;
+
+    const sourceGeometry = getFirstChild(selectedSurface.element, "PlanarGeometry");
+    if (!sourceGeometry) {
+      setStatus("Selected surface has no geometry to convert");
+      return;
+    }
+
+    const hostSurface = findOpeningHostSurface(selectedSurface, surfaces);
+    if (!hostSurface) {
+      setStatus(`No host surface found for ${selectedSurface.id}`);
+      return;
+    }
+
+    const openingId = makeUniqueOpeningId(hostSurface.id, openings);
+    const namespace = hostSurface.element.namespaceURI || doc.documentElement.namespaceURI || null;
+    const openingElement = namespace ? doc.createElementNS(namespace, "Opening") : doc.createElement("Opening");
+    openingElement.setAttribute("id", openingId);
+    openingElement.setAttribute("openingType", newOpeningType);
+    openingElement.appendChild(sourceGeometry.cloneNode(true));
+    hostSurface.element.appendChild(openingElement);
+
+    if (selectedSurface.element.parentNode) {
+      selectedSurface.element.parentNode.removeChild(selectedSurface.element);
+    }
+
+    const nextOpening = {
+      id: openingId,
+      element: openingElement,
+      openingType: newOpeningType,
+      points: selectedSurface.points.map((point) => point.clone()),
+      area: selectedSurface.area,
+      levelIds: hostSurface.levelIds.length ? [...hostSurface.levelIds] : [...selectedSurface.levelIds],
+      parentSurfaceId: hostSurface.id,
+    };
+
+    clearSelectionHighlight();
+    setSurfaces((prev) => prev.filter((surface) => surface.id !== selectedSurface.id));
+    setOpenings((prev) => [...prev, nextOpening]);
+    setPendingEdits((prev) => {
+      const next = new Map(prev);
+      next.delete(`surface:${selectedSurface.id}`);
+      return next;
+    });
+    setShowOpenings(true);
+    setSelectedKind("opening");
+    setSelectedId(openingId);
+    setStatus(`Converted ${selectedSurface.id} to ${newOpeningType}`);
+  };
+
   const downloadGbxml = () => {
     if (!doc) return;
+    if (pendingEdits.size > 0) {
+      const { updatedSurfaces, updatedOpenings } = applyEditsToModel(surfaces, openings, pendingEdits);
+      setSurfaces(updatedSurfaces);
+      setOpenings(updatedOpenings);
+      setPendingEdits(new Map());
+    }
     const serializer = new XMLSerializer();
     const xmlString = serializer.serializeToString(doc);
     const blob = new Blob([xmlString], { type: "application/xml" });
@@ -625,6 +689,25 @@ function App() {
                       </option>
                     ))}
                   </select>
+                </div>
+                <div className="surface__split">
+                  <div>
+                    <label htmlFor="newOpeningType">Opening Type</label>
+                    <select
+                      id="newOpeningType"
+                      value={newOpeningType}
+                      onChange={(event) => setNewOpeningType(event.target.value)}
+                    >
+                      {openingTypeOptions.map((type) => (
+                        <option key={type} value={type}>
+                          {type}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button className="secondary" onClick={convertSelectedSurfaceToOpening}>
+                    Convert
+                  </button>
                 </div>
                 <button className="danger" onClick={deleteSelectedSurface}>
                   Delete Surface
@@ -977,6 +1060,104 @@ function computeNormal(points) {
   return normal.normalize();
 }
 
+function findOpeningHostSurface(openingSurface, surfaces) {
+  const openingNormal = computeNormal(openingSurface.points);
+  if (openingNormal.length() < 1e-6) return null;
+
+  const openingCenter = getPointsCenter(openingSurface.points);
+  const openingSize = getPointsDiagonal(openingSurface.points);
+
+  const candidates = surfaces
+    .filter((surface) => surface.id !== openingSurface.id)
+    .filter((surface) => surface.points.length >= 3)
+    .map((surface) => {
+      const surfaceNormal = computeNormal(surface.points);
+      if (surfaceNormal.length() < 1e-6) return null;
+
+      const normalAlignment = Math.abs(surfaceNormal.dot(openingNormal));
+      if (normalAlignment < 0.9) return null;
+
+      const planeDistance = Math.abs(surfaceNormal.dot(openingCenter.clone().sub(surface.points[0])));
+      const tolerance = Math.max(0.25, openingSize * 0.08);
+      const projectedInside = projectedPointInSurface(openingCenter, surface.points, surfaceNormal);
+      const openingArea = openingSurface.area || computeArea(openingSurface.points);
+      const surfaceArea = surface.area || computeArea(surface.points);
+
+      if (!projectedInside && planeDistance > Math.max(2, openingSize * 0.25)) return null;
+      if (surfaceArea > 0 && openingArea > 0 && surfaceArea < openingArea * 0.8) return null;
+
+      const surfaceCenter = getPointsCenter(surface.points);
+      const centerDistance = openingCenter.distanceTo(surfaceCenter);
+      const distanceRank = planeDistance <= tolerance ? 0 : 1;
+      const insideRank = projectedInside ? 0 : 1;
+      return {
+        surface,
+        centerDistance,
+        planeDistance,
+        distanceRank,
+        insideRank,
+        typeRank: getHostTypeRank(surface.surfaceType),
+      };
+    })
+    .filter(Boolean)
+    .sort(
+      (a, b) =>
+        a.typeRank - b.typeRank ||
+        a.insideRank - b.insideRank ||
+        a.distanceRank - b.distanceRank ||
+        a.planeDistance - b.planeDistance ||
+        a.centerDistance - b.centerDistance
+    );
+
+  return candidates.length ? candidates[0].surface : null;
+}
+
+function projectedPointInSurface(point, surfacePoints, normal) {
+  const basis = getProjectionBasis(normal);
+  const polygon = surfacePoints.map((surfacePoint) => new THREE.Vector2(surfacePoint.dot(basis.x), surfacePoint.dot(basis.y)));
+  const projectedPoint = new THREE.Vector2(point.dot(basis.x), point.dot(basis.y));
+  return pointInPolygon(projectedPoint, polygon);
+}
+
+function getProjectionBasis(normal) {
+  const helper = Math.abs(normal.x) > 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+  const x = new THREE.Vector3().crossVectors(helper, normal).normalize();
+  const y = new THREE.Vector3().crossVectors(normal, x).normalize();
+  return { x, y };
+}
+
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+    const current = polygon[i];
+    const previous = polygon[j];
+    const intersects =
+      current.y > point.y !== previous.y > point.y &&
+      point.x < ((previous.x - current.x) * (point.y - current.y)) / (previous.y - current.y || 1e-9) + current.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+function getPointsCenter(points) {
+  const center = new THREE.Vector3();
+  points.forEach((point) => center.add(point));
+  return center.divideScalar(points.length || 1);
+}
+
+function getPointsDiagonal(points) {
+  const bounds = new THREE.Box3().setFromPoints(points);
+  return bounds.getSize(new THREE.Vector3()).length();
+}
+
+function getHostTypeRank(surfaceType) {
+  if (surfaceType === "ExteriorWall" || surfaceType === "Roof" || surfaceType === "InteriorWall") return 0;
+  if (surfaceType === "Ceiling" || surfaceType === "InteriorFloor" || surfaceType === "ExteriorFloor") return 1;
+  if (surfaceType === "SlabOnGrade" || surfaceType === "UndergroundWall" || surfaceType === "UndergroundSlab") return 2;
+  if (surfaceType === "Shade") return 4;
+  return 2;
+}
+
 function getSurfaceColor(type) {
   return typeColors[type] || typeColors.Unknown;
 }
@@ -1047,6 +1228,18 @@ function sameIdList(a, b) {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+function makeUniqueOpeningId(surfaceId, openings) {
+  const existingIds = new Set(openings.map((opening) => opening.id));
+  const baseId = `${surfaceId}-opening`;
+  let index = 1;
+  let candidate = `${baseId}-${index}`;
+  while (existingIds.has(candidate)) {
+    index += 1;
+    candidate = `${baseId}-${index}`;
+  }
+  return candidate;
 }
 
 export default App;
