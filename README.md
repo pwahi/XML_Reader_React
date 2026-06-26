@@ -23,6 +23,15 @@ A Vite + React version of the GBXML viewer that runs fully client-side and bundl
 - Download the updated GBXML file
 - On-screen legend for surface colors
 
+## Future Development / Roadmap
+- Improve GBXML validation and show clear warnings for missing or inconsistent model data
+- Add richer filtering by floor, zone, surface type, and construction category
+- Support comparison views between original and edited models
+- Add import/export workflows for zone grouping, floor mapping, and analysis metadata
+- Improve 3D interaction with better highlighting, camera presets, and section views
+- Add summary dashboards for areas, surface types, zones, and model-level checks
+- Expand test coverage for GBXML parsing, editing, and download behavior
+
 ## Notes
 - All processing stays in the browser.
 - Three.js is bundled locally so it works offline after build.
