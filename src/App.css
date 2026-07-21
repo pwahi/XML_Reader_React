@@ -187,6 +187,29 @@ button:not(:disabled):hover {
   box-shadow: inset 0 0 0 1px rgba(42, 157, 143, 0.4);
 }
 
+.selection-mode {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.6rem;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.selection-mode input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent-2);
+}
+
+.selection-actions {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
 .surface label {
   font-size: 0.75rem;
   color: var(--muted);
@@ -194,13 +217,45 @@ button:not(:disabled):hover {
   letter-spacing: 0.06em;
 }
 
-.surface select {
+.surface select,
+.surface input[type="number"] {
   width: 100%;
   padding: 0.4rem;
   border-radius: 8px;
   background: rgba(15, 23, 42, 0.85);
   color: var(--text);
   border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.shade-editor {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.35rem;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--panel-border);
+}
+
+.shade-editor__title {
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  font-weight: 600;
+}
+
+.shade-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.shade-option input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent-2);
+}
+
+.shade-editor__help {
+  color: var(--muted);
+  font-size: 0.72rem;
 }
 
 .surface__split {

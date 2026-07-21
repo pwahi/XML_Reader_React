@@ -19,6 +19,10 @@ A Vite + React version of the GBXML viewer that runs fully client-side and bundl
 - 3D view with orbit controls and surface selection
 - Surface details (ID, area, zone name)
 - Edit surface type and apply changes with "Update Model"
+- Add or remove walls from a multi-selection, including selecting all visible exterior walls at once
+- Select individual windows, multi-select with Ctrl/Cmd-click, or select every window on a wall
+- Add or update horizontal overhangs and left/right vertical fins with unit-aware projection depths
+- Export generated shade geometry as gbXML `Shade` surfaces
 - Level filter (Level 0, 1, 2...)
 - Download the updated GBXML file
 - On-screen legend for surface colors

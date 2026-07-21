@@ -25,6 +25,7 @@ const typeColors = {
 const surfaceTypeOptions = Object.keys(typeColors).filter((key) => key !== "Unknown");
 const openingTypeOptions = ["FixedWindow", "OperableWindow", "Door", "Skylight", "Air", "Unknown"];
 const openingTint = 0x6ecff6;
+const windowOpeningTypes = new Set(["FixedWindow", "OperableWindow"]);
 
 const emptySurface = { id: "", area: 0, zoneNames: [], levelIds: [], surfaceType: "Unknown" };
 const emptyOpening = { id: "", area: 0, openingType: "Unknown", levelIds: [], parentSurfaceId: "" };
@@ -43,7 +44,15 @@ function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [selectedKind, setSelectedKind] = useState("surface");
   const [selectedSurfaceIds, setSelectedSurfaceIds] = useState(new Set());
+  const [selectedOpeningIds, setSelectedOpeningIds] = useState(new Set());
+  const [surfaceMultiSelect, setSurfaceMultiSelect] = useState(true);
   const [newOpeningType, setNewOpeningType] = useState("FixedWindow");
+  const [lengthUnit, setLengthUnit] = useState("Meters");
+  const [horizontalShadeEnabled, setHorizontalShadeEnabled] = useState(true);
+  const [verticalShadeEnabled, setVerticalShadeEnabled] = useState(true);
+  const [verticalShadeSides, setVerticalShadeSides] = useState("both");
+  const [horizontalShadeDepth, setHorizontalShadeDepth] = useState(0.5);
+  const [verticalShadeDepth, setVerticalShadeDepth] = useState(0.5);
   const [selectedLevel, setSelectedLevel] = useState("all");
   const [xrayMode, setXrayMode] = useState(false);
   const [hideExterior, setHideExterior] = useState(false);
@@ -52,7 +61,6 @@ function App() {
   const [sourceFileName, setSourceFileName] = useState("");
   const [controls, setControls] = useState(null);
   const [camera, setCamera] = useState(null);
-  const [renderer, setRenderer] = useState(null);
 
   const meshesRef = useRef(new Map());
   const openingMeshesRef = useRef(new Map());
@@ -80,13 +88,31 @@ function App() {
     [openings, selectedId]
   );
 
+  const selectedOpenings = useMemo(
+    () => openings.filter((opening) => selectedOpeningIds.has(opening.id)),
+    [openings, selectedOpeningIds]
+  );
+
+  const selectedWindowOpenings = useMemo(
+    () => selectedOpenings.filter(isWindowOpening),
+    [selectedOpenings]
+  );
+
+  const selectedOpeningTypeValue = useMemo(() => {
+    if (selectedKind !== "opening" || selectedOpenings.length === 0) return "";
+    const types = selectedOpenings.map(
+      (opening) => pendingEdits.get(`opening:${opening.id}`) || opening.openingType
+    );
+    return types.every((type) => type === types[0]) ? types[0] : "";
+  }, [pendingEdits, selectedKind, selectedOpenings]);
+
   function updateSelectionHighlights() {
     meshesRef.current.forEach((mesh, surfaceId) => {
       const selected = selectedKind === "surface" && selectedSurfaceIds.has(surfaceId);
       mesh.material.emissive?.setHex(selected ? 0x1f2937 : 0x000000);
     });
     openingMeshesRef.current.forEach((mesh, openingId) => {
-      const selected = selectedKind === "opening" && selectedId === openingId;
+      const selected = selectedKind === "opening" && selectedOpeningIds.has(openingId);
       mesh.material.emissive?.setHex(selected ? 0x1f2937 : 0x000000);
     });
   }
@@ -131,7 +157,6 @@ function App() {
     controlsInstance.enableDamping = true;
 
     setCamera(cameraInstance);
-    setRenderer(rendererInstance);
     setControls(controlsInstance);
 
     let animationFrame;
@@ -157,24 +182,6 @@ function App() {
     };
   }, []);
 
-  useEffect(() => {
-    rebuildScene();
-  }, [surfaces, openings, camera, controls]);
-
-  useEffect(() => {
-    applyLevelFilter();
-  }, [selectedLevel, surfaces]);
-
-  useEffect(() => {
-    updateSurfaceMaterials(meshesRef, xrayMode);
-    updateOpeningMaterials(openingMeshesRef);
-    applyExteriorVisibility();
-  }, [xrayMode, hideExterior, surfaces, openings, showOpenings]);
-
-  useEffect(() => {
-    updateSelectionHighlights();
-  }, [selectedKind, selectedId, selectedSurfaceIds, surfaces, openings]);
-
   const visibleSurfaces = useMemo(() => {
     if (selectedLevel === "all") return surfaces;
     return surfaces.filter((surface) => surface.levelIds.includes(selectedLevel));
@@ -195,7 +202,7 @@ function App() {
     reader.onload = () => {
       try {
         const text = reader.result;
-        const { doc: parsedDoc, surfaces: parsedSurfaces, levels: parsedLevels, openings: parsedOpenings } = parseGbxml(text);
+        const { doc: parsedDoc, surfaces: parsedSurfaces, levels: parsedLevels, openings: parsedOpenings, lengthUnit: parsedLengthUnit } = parseGbxml(text);
         setDoc(parsedDoc);
         setSurfaces(parsedSurfaces);
         setOpenings(parsedOpenings);
@@ -205,6 +212,11 @@ function App() {
         setSelectedId(null);
         setSelectedKind("surface");
         setSelectedSurfaceIds(new Set());
+        setSelectedOpeningIds(new Set());
+        setLengthUnit(parsedLengthUnit);
+        const defaultDepth = getDefaultShadeDepth(parsedLengthUnit);
+        setHorizontalShadeDepth(defaultDepth);
+        setVerticalShadeDepth(defaultDepth);
         setSourceFileName(file.name);
         setStatus(`Loaded ${parsedSurfaces.length} surfaces`);
       } catch (error) {
@@ -228,6 +240,7 @@ function App() {
 
     clearSelectionHighlight();
     setSelectedKind("surface");
+    setSelectedOpeningIds(new Set());
     if (additive) {
       setSelectedSurfaceIds((prev) => {
         const next = selectedKind === "surface" ? new Set(prev) : new Set();
@@ -246,7 +259,7 @@ function App() {
     }
   };
 
-  const selectOpening = (openingId) => {
+  const selectOpening = (openingId, additive = false) => {
     if (!openingId) return;
     const opening = openings.find((item) => item.id === openingId);
     if (!opening) return;
@@ -255,13 +268,57 @@ function App() {
 
     clearSelectionHighlight();
     setSelectedKind("opening");
-    setSelectedId(openingId);
     setSelectedSurfaceIds(new Set());
-
-    const mesh = openingMeshesRef.current.get(openingId);
-    if (mesh) {
-      mesh.material.emissive = new THREE.Color(0x1f2937);
+    if (additive) {
+      setSelectedOpeningIds((prev) => {
+        const next = selectedKind === "opening" ? new Set(prev) : new Set();
+        if (next.has(openingId)) next.delete(openingId);
+        else next.add(openingId);
+        const nextIds = Array.from(next);
+        setSelectedId(nextIds.length ? nextIds[nextIds.length - 1] : null);
+        return next;
+      });
+    } else {
+      setSelectedOpeningIds(new Set([openingId]));
+      setSelectedId(openingId);
     }
+  };
+
+  const selectWindowsOnWall = (surfaceId) => {
+    const wallWindows = openings.filter(
+      (opening) => opening.parentSurfaceId === surfaceId && isWindowOpening(opening)
+    );
+    if (!wallWindows.length) {
+      setStatus(`No windows found on ${surfaceId}`);
+      return;
+    }
+    setShowOpenings(true);
+    setSelectedKind("opening");
+    setSelectedSurfaceIds(new Set());
+    setSelectedOpeningIds(new Set(wallWindows.map((opening) => opening.id)));
+    setSelectedId(wallWindows[wallWindows.length - 1].id);
+    setStatus(`Selected ${wallWindows.length} window${wallWindows.length === 1 ? "" : "s"} on ${surfaceId}`);
+  };
+
+  const selectVisibleExteriorWalls = () => {
+    const exteriorWallIds = visibleSurfaces
+      .filter((surface) => surface.surfaceType === "ExteriorWall")
+      .map((surface) => surface.id);
+    if (!exteriorWallIds.length) {
+      setStatus("No exterior walls found on the visible level");
+      return;
+    }
+    setSelectedKind("surface");
+    setSelectedOpeningIds(new Set());
+    setSelectedSurfaceIds(new Set(exteriorWallIds));
+    setSelectedId(exteriorWallIds[exteriorWallIds.length - 1]);
+    setStatus(`Selected ${exteriorWallIds.length} exterior wall${exteriorWallIds.length === 1 ? "" : "s"}`);
+  };
+
+  const clearSurfaceSelection = () => {
+    setSelectedSurfaceIds(new Set());
+    setSelectedId(null);
+    setStatus("Surface selection cleared");
   };
 
   const handlePick = (event) => {
@@ -281,6 +338,15 @@ function App() {
     const hits = raycaster.intersectObjects(meshes, false);
 
     if (hits.length) {
+      // Openings are coplanar with their host surface, so explicitly prioritize them.
+      if (!event.shiftKey) {
+        const openingHit = hits.find((hit) => hit.object?.userData?.openingId);
+        if (openingHit) {
+          selectOpening(openingHit.object.userData.openingId, event.ctrlKey || event.metaKey);
+          return;
+        }
+      }
+
       // Prefer an internal floor when clicking from above.
       if (!event.shiftKey) {
         const floorHit = hits.find((hit) => {
@@ -289,7 +355,10 @@ function App() {
           return surface ? surface.surfaceType === "InteriorFloor" : false;
         });
         if (floorHit) {
-          selectSurface(floorHit.object.userData.surfaceId, event.ctrlKey || event.metaKey);
+          selectSurface(
+            floorHit.object.userData.surfaceId,
+            surfaceMultiSelect || event.ctrlKey || event.metaKey
+          );
           return;
         }
       }
@@ -322,9 +391,12 @@ function App() {
 
       const pickedRoot = candidates[pickCycleRef.current.index];
       if (pickedRoot.userData.surfaceId) {
-        selectSurface(pickedRoot.userData.surfaceId, event.ctrlKey || event.metaKey);
+        selectSurface(
+          pickedRoot.userData.surfaceId,
+          surfaceMultiSelect || event.ctrlKey || event.metaKey
+        );
       } else if (pickedRoot.userData.openingId) {
-        selectOpening(pickedRoot.userData.openingId);
+        selectOpening(pickedRoot.userData.openingId, event.ctrlKey || event.metaKey);
       }
     }
   };
@@ -350,12 +422,93 @@ function App() {
 
   const handleOpeningTypeChange = (event) => {
     const nextType = event.target.value;
-    if (!selectedOpening?.id) return;
+    const targetOpeningIds = selectedOpeningIds.size
+      ? Array.from(selectedOpeningIds)
+      : selectedOpening?.id
+        ? [selectedOpening.id]
+        : [];
+    if (!targetOpeningIds.length) return;
     setPendingEdits((prev) => {
       const next = new Map(prev);
-      next.set(`opening:${selectedOpening.id}`, nextType);
+      targetOpeningIds.forEach((openingId) => next.set(`opening:${openingId}`, nextType));
       return next;
     });
+  };
+
+  const applyWindowShades = () => {
+    if (!doc || selectedWindowOpenings.length === 0) return;
+    const horizontalDepth = Number(horizontalShadeDepth);
+    const verticalDepth = Number(verticalShadeDepth);
+    if (horizontalShadeEnabled && (!Number.isFinite(horizontalDepth) || horizontalDepth <= 0)) {
+      setStatus("Horizontal shade depth must be greater than zero");
+      return;
+    }
+    if (verticalShadeEnabled && (!Number.isFinite(verticalDepth) || verticalDepth <= 0)) {
+      setStatus("Vertical shade depth must be greater than zero");
+      return;
+    }
+
+    const targetIds = new Set(selectedWindowOpenings.map((opening) => opening.id));
+    const desiredKinds = new Set();
+    if (horizontalShadeEnabled) desiredKinds.add("horizontal");
+    if (verticalShadeEnabled && (verticalShadeSides === "left" || verticalShadeSides === "both")) {
+      desiredKinds.add("vertical-left");
+    }
+    if (verticalShadeEnabled && (verticalShadeSides === "right" || verticalShadeSides === "both")) {
+      desiredKinds.add("vertical-right");
+    }
+
+    const retainedSurfaces = [];
+    const managedByKey = new Map();
+    surfaces.forEach((surface) => {
+      const managedForTarget = surface.shadeFor && targetIds.has(surface.shadeFor);
+      if (managedForTarget && !desiredKinds.has(surface.shadeKind)) {
+        surface.element?.parentNode?.removeChild(surface.element);
+        return;
+      }
+      retainedSurfaces.push(surface);
+      if (managedForTarget) managedByKey.set(`${surface.shadeFor}:${surface.shadeKind}`, surface);
+    });
+
+    const additions = [];
+    let skipped = 0;
+    selectedWindowOpenings.forEach((opening) => {
+      const hostSurface = surfaces.find((surface) => surface.id === opening.parentSurfaceId);
+      const definitions = hostSurface
+        ? createWindowShadeDefinitions(opening, hostSurface, {
+            horizontalDepth,
+            verticalDepth,
+            desiredKinds,
+          })
+        : [];
+      if (!hostSurface || definitions.length !== desiredKinds.size) {
+        skipped += 1;
+        return;
+      }
+      definitions.forEach((definition) => {
+        const key = `${opening.id}:${definition.kind}`;
+        const existing = managedByKey.get(key);
+        if (existing) {
+          replaceSurfaceGeometry(doc, existing.element, definition.points);
+          existing.points = definition.points;
+          existing.area = computeArea(definition.points);
+        } else {
+          additions.push(createShadeSurface(doc, hostSurface, opening, definition, retainedSurfaces.concat(additions)));
+        }
+      });
+    });
+
+    setSurfaces([...retainedSurfaces, ...additions]);
+    const applied = selectedWindowOpenings.length - skipped;
+    if (desiredKinds.size === 0) {
+      setStatus(`Removed generated shades from ${selectedWindowOpenings.length} window${selectedWindowOpenings.length === 1 ? "" : "s"}`);
+      return;
+    }
+    setStatus(
+      skipped
+        ? `Applied shades to ${applied} window${applied === 1 ? "" : "s"}; skipped ${skipped} unsupported geometry`
+        : `Applied shades to ${applied} window${applied === 1 ? "" : "s"}`
+    );
   };
 
   const applyPendingEdits = () => {
@@ -415,6 +568,7 @@ function App() {
     setSelectedId(null);
     setSelectedKind("surface");
     setSelectedSurfaceIds(new Set());
+    setSelectedOpeningIds(new Set());
     setStatus(`Deleted surface ${selectedSurface.id}`);
   };
 
@@ -467,6 +621,7 @@ function App() {
     setSelectedKind("opening");
     setSelectedId(openingId);
     setSelectedSurfaceIds(new Set());
+    setSelectedOpeningIds(new Set([openingId]));
     setStatus(`Converted ${selectedSurface.id} to ${newOpeningType}`);
   };
 
@@ -489,7 +644,7 @@ function App() {
     URL.revokeObjectURL(url);
   };
 
-  const rebuildScene = () => {
+  function rebuildScene() {
     const group = modelGroupRef.current;
     group.clear();
     meshesRef.current.clear();
@@ -581,14 +736,16 @@ function App() {
 
       controls.target.copy(adjustedCenter);
       camera.position.copy(adjustedCenter).addScaledVector(viewDirection, fitDistance);
+      // Three.js cameras are intentionally mutable scene objects.
+      // eslint-disable-next-line react-hooks/immutability
       camera.near = maxDim / 100;
       camera.far = maxDim * 20;
       camera.lookAt(adjustedCenter);
       camera.updateProjectionMatrix();
     }
-  };
+  }
 
-  const applyLevelFilter = () => {
+  function applyLevelFilter() {
     updateVisibility();
 
     if (selectedKind === "surface" && selectedSurfaceIds.size > 0) {
@@ -610,20 +767,22 @@ function App() {
         setSelectedSurfaceIds(nextSelectedSurfaceIds);
         setSelectedId(nextIds.includes(selectedId) ? selectedId : nextIds[nextIds.length - 1] || null);
       }
-    } else if (selectedId) {
-      if (selectedKind === "opening") {
-        const selectedOpeningMatch = openings.find((opening) => opening.id === selectedId);
-        const selectedLevelMatch =
-          !selectedOpeningMatch || selectedLevel === "all" || selectedOpeningMatch.levelIds.includes(selectedLevel);
-
-        if (!selectedOpeningMatch || !selectedLevelMatch || !showOpenings) {
-          setSelectedId(null);
-        }
+    } else if (selectedKind === "opening" && selectedOpeningIds.size > 0) {
+      const nextSelectedOpeningIds = new Set(
+        Array.from(selectedOpeningIds).filter((openingId) => {
+          const opening = openings.find((item) => item.id === openingId);
+          return opening && showOpenings && (selectedLevel === "all" || opening.levelIds.includes(selectedLevel));
+        })
+      );
+      if (nextSelectedOpeningIds.size !== selectedOpeningIds.size) {
+        const nextIds = Array.from(nextSelectedOpeningIds);
+        setSelectedOpeningIds(nextSelectedOpeningIds);
+        setSelectedId(nextIds.includes(selectedId) ? selectedId : nextIds[nextIds.length - 1] || null);
       }
     }
-  };
+  }
 
-  const applyExteriorVisibility = () => {
+  function applyExteriorVisibility() {
     meshesRef.current.forEach((mesh) => {
       const surfaceType = mesh.userData.surfaceType || "Unknown";
       const exterior = isExteriorSurface(surfaceType);
@@ -645,9 +804,9 @@ function App() {
         setSelectedId(nextIds.includes(selectedId) ? selectedId : nextIds[nextIds.length - 1] || null);
       }
     }
-  };
+  }
 
-  const updateVisibility = () => {
+  function updateVisibility() {
     const visibleIds = new Set(visibleSurfaces.map((surface) => surface.id));
     meshesRef.current.forEach((mesh, surfaceId) => {
       const allowedByLevel = visibleIds.has(surfaceId);
@@ -660,7 +819,25 @@ function App() {
       const allowedByLevel = visibleOpeningIds.has(openingId);
       mesh.visible = showOpenings && allowedByLevel;
     });
-  };
+  }
+
+  useEffect(() => {
+    rebuildScene();
+  }, [surfaces, openings, camera, controls]);
+
+  useEffect(() => {
+    applyLevelFilter();
+  }, [selectedLevel, surfaces, openings, showOpenings]);
+
+  useEffect(() => {
+    updateSurfaceMaterials(meshesRef, xrayMode);
+    updateOpeningMaterials(openingMeshesRef);
+    applyExteriorVisibility();
+  }, [xrayMode, hideExterior, surfaces, openings, showOpenings]);
+
+  useEffect(() => {
+    updateSelectionHighlights();
+  }, [selectedKind, selectedId, selectedSurfaceIds, selectedOpeningIds, surfaces, openings]);
 
   const statusClass = doc ? "badge" : "badge badge--idle";
 
@@ -823,35 +1000,43 @@ function App() {
                 <button className="danger" onClick={deleteSelectedSurface}>
                   Delete Surface
                 </button>
+                {openings.some(
+                  (opening) => opening.parentSurfaceId === selectedSurface.id && isWindowOpening(opening)
+                ) ? (
+                  <button className="secondary" onClick={() => selectWindowsOnWall(selectedSurface.id)}>
+                    Select all windows on wall
+                  </button>
+                ) : null}
               </>
-            ) : selectedId && selectedKind === "opening" ? (
+            ) : selectedKind === "opening" && selectedOpenings.length > 0 ? (
               <>
                 <div>
-                  <label>Opening ID</label>
-                  <div>{selectedOpening.id || "Unknown"}</div>
+                  <label>{selectedOpenings.length > 1 ? "Selected Openings" : "Opening ID"}</label>
+                  <div>{selectedOpenings.length > 1 ? selectedOpenings.length : selectedOpening.id || "Unknown"}</div>
                 </div>
                 <div>
-                  <label>Opening Area</label>
-                  <div>{selectedOpening.area ? selectedOpening.area.toFixed(2) : "0.00"}</div>
+                  <label>{selectedOpenings.length > 1 ? "Total Area" : "Opening Area"}</label>
+                  <div>{selectedOpenings.reduce((sum, opening) => sum + (opening.area || 0), 0).toFixed(2)}</div>
                 </div>
-                <div>
+                {selectedOpenings.length === 1 ? <div>
                   <label>Level</label>
                   <div>
                     {selectedOpening.levelIds.length
                       ? selectedOpening.levelIds.map((levelId) => getLevelDisplayName(levels, levelId)).join(", ")
                       : "Unknown"}
                   </div>
-                </div>
+                </div> : null}
                 <div>
-                  <label>Parent Surface</label>
-                  <div>{selectedOpening.parentSurfaceId || "Unknown"}</div>
+                  <label>{new Set(selectedOpenings.map((opening) => opening.parentSurfaceId)).size > 1 ? "Parent Surfaces" : "Parent Surface"}</label>
+                  <div>{Array.from(new Set(selectedOpenings.map((opening) => opening.parentSurfaceId))).join(", ") || "Unknown"}</div>
                 </div>
                 <div>
                   <label>Opening Type</label>
                   <select
-                    value={pendingEdits.get(`opening:${selectedOpening.id}`) || selectedOpening.openingType}
+                    value={selectedOpeningTypeValue}
                     onChange={handleOpeningTypeChange}
                   >
+                    {selectedOpeningTypeValue === "" ? <option value="" disabled>Mixed types</option> : null}
                     {openingTypeOptions.map((type) => (
                       <option key={type} value={type}>
                         {type}
@@ -859,6 +1044,69 @@ function App() {
                     ))}
                   </select>
                 </div>
+                {new Set(selectedWindowOpenings.map((opening) => opening.parentSurfaceId)).size === 1 ? (
+                  <button className="secondary" onClick={() => selectWindowsOnWall(selectedWindowOpenings[0].parentSurfaceId)}>
+                    Select all windows on wall
+                  </button>
+                ) : null}
+                {selectedWindowOpenings.length > 0 ? (
+                  <div className="shade-editor">
+                    <div className="shade-editor__title">Window shades ({selectedWindowOpenings.length})</div>
+                    <label className="shade-option">
+                      <span>Horizontal overhang</span>
+                      <input
+                        type="checkbox"
+                        checked={horizontalShadeEnabled}
+                        onChange={(event) => setHorizontalShadeEnabled(event.target.checked)}
+                      />
+                    </label>
+                    <label htmlFor="horizontalShadeDepth">Horizontal depth ({lengthUnit})</label>
+                    <input
+                      id="horizontalShadeDepth"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={horizontalShadeDepth}
+                      disabled={!horizontalShadeEnabled}
+                      onChange={(event) => setHorizontalShadeDepth(event.target.value)}
+                    />
+                    <label className="shade-option">
+                      <span>Vertical fins</span>
+                      <input
+                        type="checkbox"
+                        checked={verticalShadeEnabled}
+                        onChange={(event) => setVerticalShadeEnabled(event.target.checked)}
+                      />
+                    </label>
+                    <label htmlFor="verticalShadeSides">Vertical sides</label>
+                    <select
+                      id="verticalShadeSides"
+                      value={verticalShadeSides}
+                      disabled={!verticalShadeEnabled}
+                      onChange={(event) => setVerticalShadeSides(event.target.value)}
+                    >
+                      <option value="both">Both sides</option>
+                      <option value="left">Left only</option>
+                      <option value="right">Right only</option>
+                    </select>
+                    <label htmlFor="verticalShadeDepth">Vertical depth ({lengthUnit})</label>
+                    <input
+                      id="verticalShadeDepth"
+                      type="number"
+                      min="0"
+                      step="any"
+                      value={verticalShadeDepth}
+                      disabled={!verticalShadeEnabled}
+                      onChange={(event) => setVerticalShadeDepth(event.target.value)}
+                    />
+                    <button className="primary" onClick={applyWindowShades}>
+                      Apply shades
+                    </button>
+                    <div className="shade-editor__help">Clear both options and apply to remove generated shades.</div>
+                  </div>
+                ) : (
+                  <div className="placeholder">Shades can be added to fixed and operable windows.</div>
+                )}
               </>
             ) : (
               <div className="placeholder">Click a surface or opening to see details.</div>
@@ -868,17 +1116,53 @@ function App() {
 
         <div className="panel__section">
           <h2>Surfaces</h2>
+          <label className="selection-mode">
+            <span>Add walls to selection</span>
+            <input
+              type="checkbox"
+              checked={surfaceMultiSelect}
+              onChange={(event) => setSurfaceMultiSelect(event.target.checked)}
+            />
+          </label>
+          <div className="selection-actions">
+            <button className="secondary" onClick={selectVisibleExteriorWalls} disabled={visibleSurfaces.length === 0}>
+              Select exterior walls
+            </button>
+            <button onClick={clearSurfaceSelection} disabled={selectedKind !== "surface" || selectedSurfaceIds.size === 0}>
+              Clear
+            </button>
+          </div>
           <div className="surface-list">
             {visibleSurfaces.map((surface) => (
               <button
                 key={surface.id}
                 className={selectedKind === "surface" && selectedSurfaceIds.has(surface.id) ? "active" : ""}
-                onClick={(event) => selectSurface(surface.id, event.ctrlKey || event.metaKey)}
+                onClick={(event) =>
+                  selectSurface(surface.id, surfaceMultiSelect || event.ctrlKey || event.metaKey)
+                }
               >
                 {surface.id || "Surface"} - {surface.surfaceType}
                 {surface.levelIds.length ? ` - ${getLevelDisplayName(levels, surface.levelIds[0])}` : ""}
               </button>
             ))}
+          </div>
+        </div>
+
+        <div className="panel__section">
+          <h2>Windows</h2>
+          <div className="surface-list">
+            {visibleOpenings.filter(isWindowOpening).map((opening) => (
+              <button
+                key={opening.id}
+                className={selectedKind === "opening" && selectedOpeningIds.has(opening.id) ? "active" : ""}
+                onClick={(event) => selectOpening(opening.id, event.ctrlKey || event.metaKey)}
+              >
+                {opening.id} - {opening.parentSurfaceId}
+              </button>
+            ))}
+            {visibleOpenings.filter(isWindowOpening).length === 0 ? (
+              <div className="placeholder">No windows on the visible level.</div>
+            ) : null}
           </div>
         </div>
       </aside>
@@ -900,7 +1184,7 @@ function App() {
             </div>
           </div>
         </div>
-        <div className="hint">Drag to orbit - Scroll to zoom - Ctrl/Cmd-click surfaces to multi-select</div>
+        <div className="hint">Drag to orbit - Scroll to zoom - Click walls to add/remove - Shift-click to cycle</div>
       </main>
     </div>
   );
@@ -912,6 +1196,7 @@ function parseGbxml(text) {
   if (doc.getElementsByTagName("parsererror").length) {
     throw new Error("Invalid XML");
   }
+  const lengthUnit = doc.documentElement.getAttribute("lengthUnit") || "model units";
 
   const storeyMap = new Map();
   const storeys = Array.from(doc.getElementsByTagNameNS("*", "BuildingStorey"));
@@ -953,6 +1238,8 @@ function parseGbxml(text) {
   const surfaces = Array.from(doc.getElementsByTagNameNS("*", "Surface")).map((surface, index) => {
     const id = surface.getAttribute("id") || `surface-${index + 1}`;
     const surfaceType = surface.getAttribute("surfaceType") || "Unknown";
+    const name = findDirectChildText(surface, "Name");
+    const managedShade = parseManagedShadeName(name);
 
     const spaceRefs = Array.from(surface.getElementsByTagNameNS("*", "AdjacentSpaceId"))
       .map((adjacent) => adjacent.getAttribute("spaceIdRef"))
@@ -996,6 +1283,9 @@ function parseGbxml(text) {
       minZ,
       levelIds,
       levelNames,
+      name,
+      shadeFor: managedShade?.openingId || null,
+      shadeKind: managedShade?.kind || null,
     };
 
     const openingNodes = [
@@ -1026,8 +1316,21 @@ function parseGbxml(text) {
 
   const levels = buildLevels(storeyMap, surfaces);
   assignFallbackLevels(levels, surfaces);
+  const surfaceById = new Map(surfaces.map((surface) => [surface.id, surface]));
+  openings.forEach((opening) => {
+    if (opening.levelIds.length) return;
+    const parent = surfaceById.get(opening.parentSurfaceId);
+    if (parent) opening.levelIds = [...parent.levelIds];
+  });
 
-  return { doc, surfaces, levels, openings };
+  return { doc, surfaces, levels, openings, lengthUnit };
+}
+
+function findDirectChildText(root, localName) {
+  const child = Array.from(root.childNodes).find(
+    (node) => node.nodeType === 1 && (node.localName || node.nodeName.split(":").pop()) === localName
+  );
+  return child?.textContent?.trim() || "";
 }
 
 function findText(root, names) {
@@ -1362,6 +1665,151 @@ function makeUniqueOpeningId(surfaceId, openings) {
     candidate = `${baseId}-${index}`;
   }
   return candidate;
+}
+
+function isWindowOpening(opening) {
+  return windowOpeningTypes.has(opening?.openingType);
+}
+
+function getDefaultShadeDepth(lengthUnit) {
+  const normalized = String(lengthUnit).toLowerCase();
+  if (normalized.includes("milli")) return 500;
+  if (normalized.includes("centi")) return 50;
+  if (normalized.includes("inch")) return 18;
+  if (normalized.includes("feet") || normalized.includes("foot")) return 1.5;
+  return 0.5;
+}
+
+function parseManagedShadeName(name) {
+  const match = /^GBXML Viewer (horizontal|vertical-left|vertical-right) shade for (.+)$/.exec(name || "");
+  return match ? { kind: match[1], openingId: match[2] } : null;
+}
+
+function createWindowShadeDefinitions(opening, hostSurface, settings) {
+  if (opening.points.length < 3 || hostSurface.points.length < 3) return [];
+  const normal = computeNormal(hostSurface.points);
+  if (normal.lengthSq() < 1e-8 || Math.abs(normal.z) > 0.35) return [];
+
+  const up = new THREE.Vector3(0, 0, 1).addScaledVector(normal, -normal.z).normalize();
+  const right = new THREE.Vector3().crossVectors(up, normal).normalize();
+  if (up.lengthSq() < 1e-8 || right.lengthSq() < 1e-8) return [];
+
+  const origin = opening.points[0];
+  const coordinates = opening.points.map((point) => {
+    const relative = point.clone().sub(origin);
+    return { horizontal: relative.dot(right), vertical: relative.dot(up) };
+  });
+  const minHorizontal = Math.min(...coordinates.map((coordinate) => coordinate.horizontal));
+  const maxHorizontal = Math.max(...coordinates.map((coordinate) => coordinate.horizontal));
+  const minVertical = Math.min(...coordinates.map((coordinate) => coordinate.vertical));
+  const maxVertical = Math.max(...coordinates.map((coordinate) => coordinate.vertical));
+  if (maxHorizontal - minHorizontal < 1e-6 || maxVertical - minVertical < 1e-6) return [];
+
+  const pointAt = (horizontal, vertical) =>
+    origin.clone().addScaledVector(right, horizontal).addScaledVector(up, vertical);
+  const bottomLeft = pointAt(minHorizontal, minVertical);
+  const bottomRight = pointAt(maxHorizontal, minVertical);
+  const topLeft = pointAt(minHorizontal, maxVertical);
+  const topRight = pointAt(maxHorizontal, maxVertical);
+  const projected = (point, depth) => point.clone().addScaledVector(normal, depth);
+  const definitions = [];
+
+  if (settings.desiredKinds.has("horizontal")) {
+    definitions.push({
+      kind: "horizontal",
+      points: [topLeft, topRight, projected(topRight, settings.horizontalDepth), projected(topLeft, settings.horizontalDepth)],
+    });
+  }
+  if (settings.desiredKinds.has("vertical-left")) {
+    definitions.push({
+      kind: "vertical-left",
+      points: [bottomLeft, topLeft, projected(topLeft, settings.verticalDepth), projected(bottomLeft, settings.verticalDepth)],
+    });
+  }
+  if (settings.desiredKinds.has("vertical-right")) {
+    definitions.push({
+      kind: "vertical-right",
+      points: [bottomRight, projected(bottomRight, settings.verticalDepth), projected(topRight, settings.verticalDepth), topRight],
+    });
+  }
+  return definitions;
+}
+
+function createShadeSurface(doc, hostSurface, opening, definition, existingSurfaces) {
+  const namespace = hostSurface.element.namespaceURI || doc.documentElement.namespaceURI || null;
+  const surfaceElement = createXmlElement(doc, namespace, "Surface");
+  const id = makeUniqueSurfaceId(`${makeXmlIdPart(opening.id)}-${definition.kind}-shade`, existingSurfaces);
+  surfaceElement.setAttribute("id", id);
+  surfaceElement.setAttribute("surfaceType", "Shade");
+  const name = `GBXML Viewer ${definition.kind} shade for ${opening.id}`;
+  const nameElement = createXmlElement(doc, namespace, "Name");
+  nameElement.textContent = name;
+  surfaceElement.appendChild(nameElement);
+  surfaceElement.appendChild(createPlanarGeometryElement(doc, namespace, definition.points));
+  hostSurface.element.parentNode.appendChild(surfaceElement);
+
+  return {
+    id,
+    element: surfaceElement,
+    surfaceType: "Shade",
+    points: definition.points,
+    area: computeArea(definition.points),
+    zoneNames: [],
+    minZ: Math.min(...definition.points.map((point) => point.z)),
+    levelIds: [...hostSurface.levelIds],
+    levelNames: [...hostSurface.levelNames],
+    name,
+    shadeFor: opening.id,
+    shadeKind: definition.kind,
+  }
+}
+
+function replaceSurfaceGeometry(doc, surfaceElement, points) {
+  const namespace = surfaceElement.namespaceURI || doc.documentElement.namespaceURI || null;
+  const replacement = createPlanarGeometryElement(doc, namespace, points);
+  const existing = Array.from(surfaceElement.childNodes).find(
+    (node) => node.nodeType === 1 && (node.localName || node.nodeName.split(":").pop()) === "PlanarGeometry"
+  );
+  if (existing) surfaceElement.replaceChild(replacement, existing);
+  else surfaceElement.appendChild(replacement);
+}
+
+function createPlanarGeometryElement(doc, namespace, points) {
+  const planarGeometry = createXmlElement(doc, namespace, "PlanarGeometry");
+  const polyLoop = createXmlElement(doc, namespace, "PolyLoop");
+  points.forEach((point) => {
+    const cartesianPoint = createXmlElement(doc, namespace, "CartesianPoint");
+    [point.x, point.y, point.z].forEach((value) => {
+      const coordinate = createXmlElement(doc, namespace, "Coordinate");
+      coordinate.textContent = formatCoordinate(value);
+      cartesianPoint.appendChild(coordinate);
+    });
+    polyLoop.appendChild(cartesianPoint);
+  });
+  planarGeometry.appendChild(polyLoop);
+  return planarGeometry;
+}
+
+function createXmlElement(doc, namespace, localName) {
+  return namespace ? doc.createElementNS(namespace, localName) : doc.createElement(localName);
+}
+
+function makeUniqueSurfaceId(baseId, surfaces) {
+  const ids = new Set(surfaces.map((surface) => surface.id));
+  if (!ids.has(baseId)) return baseId;
+  let index = 2;
+  while (ids.has(`${baseId}-${index}`)) index += 1;
+  return `${baseId}-${index}`;
+}
+
+function makeXmlIdPart(value) {
+  const sanitized = String(value || "window").replace(/[^A-Za-z0-9_.-]/g, "-");
+  return /^[A-Za-z_]/.test(sanitized) ? sanitized : `window-${sanitized}`;
+}
+
+function formatCoordinate(value) {
+  const rounded = Math.round(value * 1e6) / 1e6;
+  return Object.is(rounded, -0) ? "0" : String(rounded);
 }
 
 export default App;
