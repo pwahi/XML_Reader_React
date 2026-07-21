@@ -45,7 +45,6 @@ function App() {
   const [selectedKind, setSelectedKind] = useState("surface");
   const [selectedSurfaceIds, setSelectedSurfaceIds] = useState(new Set());
   const [selectedOpeningIds, setSelectedOpeningIds] = useState(new Set());
-  const [surfaceMultiSelect, setSurfaceMultiSelect] = useState(true);
   const [newOpeningType, setNewOpeningType] = useState("FixedWindow");
   const [lengthUnit, setLengthUnit] = useState("Meters");
   const [horizontalShadeEnabled, setHorizontalShadeEnabled] = useState(true);
@@ -284,12 +283,13 @@ function App() {
     }
   };
 
-  const selectWindowsOnWall = (surfaceId) => {
+  const selectWindowsOnWalls = (surfaceIds) => {
+    const wallIds = new Set(surfaceIds);
     const wallWindows = openings.filter(
-      (opening) => opening.parentSurfaceId === surfaceId && isWindowOpening(opening)
+      (opening) => wallIds.has(opening.parentSurfaceId) && isWindowOpening(opening)
     );
     if (!wallWindows.length) {
-      setStatus(`No windows found on ${surfaceId}`);
+      setStatus(`No windows found on the selected wall${wallIds.size === 1 ? "" : "s"}`);
       return;
     }
     setShowOpenings(true);
@@ -297,22 +297,9 @@ function App() {
     setSelectedSurfaceIds(new Set());
     setSelectedOpeningIds(new Set(wallWindows.map((opening) => opening.id)));
     setSelectedId(wallWindows[wallWindows.length - 1].id);
-    setStatus(`Selected ${wallWindows.length} window${wallWindows.length === 1 ? "" : "s"} on ${surfaceId}`);
-  };
-
-  const selectVisibleExteriorWalls = () => {
-    const exteriorWallIds = visibleSurfaces
-      .filter((surface) => surface.surfaceType === "ExteriorWall")
-      .map((surface) => surface.id);
-    if (!exteriorWallIds.length) {
-      setStatus("No exterior walls found on the visible level");
-      return;
-    }
-    setSelectedKind("surface");
-    setSelectedOpeningIds(new Set());
-    setSelectedSurfaceIds(new Set(exteriorWallIds));
-    setSelectedId(exteriorWallIds[exteriorWallIds.length - 1]);
-    setStatus(`Selected ${exteriorWallIds.length} exterior wall${exteriorWallIds.length === 1 ? "" : "s"}`);
+    setStatus(
+      `Selected ${wallWindows.length} window${wallWindows.length === 1 ? "" : "s"} on ${wallIds.size} wall${wallIds.size === 1 ? "" : "s"}`
+    );
   };
 
   const clearSurfaceSelection = () => {
@@ -347,22 +334,6 @@ function App() {
         }
       }
 
-      // Prefer an internal floor when clicking from above.
-      if (!event.shiftKey) {
-        const floorHit = hits.find((hit) => {
-          if (!hit.object?.userData?.surfaceId) return false;
-          const surface = surfaces.find((item) => item.id === hit.object.userData.surfaceId);
-          return surface ? surface.surfaceType === "InteriorFloor" : false;
-        });
-        if (floorHit) {
-          selectSurface(
-            floorHit.object.userData.surfaceId,
-            surfaceMultiSelect || event.ctrlKey || event.metaKey
-          );
-          return;
-        }
-      }
-
       const candidates = hits
         .map((hit) => hit.object)
         .filter(Boolean)
@@ -391,10 +362,7 @@ function App() {
 
       const pickedRoot = candidates[pickCycleRef.current.index];
       if (pickedRoot.userData.surfaceId) {
-        selectSurface(
-          pickedRoot.userData.surfaceId,
-          surfaceMultiSelect || event.ctrlKey || event.metaKey
-        );
+        selectSurface(pickedRoot.userData.surfaceId, true);
       } else if (pickedRoot.userData.openingId) {
         selectOpening(pickedRoot.userData.openingId, event.ctrlKey || event.metaKey);
       }
@@ -942,6 +910,18 @@ function App() {
                     ))}
                   </select>
                 </div>
+                {selectedSurfaces.some((surface) =>
+                  openings.some(
+                    (opening) => opening.parentSurfaceId === surface.id && isWindowOpening(opening)
+                  )
+                ) ? (
+                  <button
+                    className="secondary"
+                    onClick={() => selectWindowsOnWalls(selectedSurfaces.map((surface) => surface.id))}
+                  >
+                    Select windows on selected walls
+                  </button>
+                ) : null}
               </>
             ) : selectedId && selectedKind === "surface" ? (
               <>
@@ -1003,8 +983,8 @@ function App() {
                 {openings.some(
                   (opening) => opening.parentSurfaceId === selectedSurface.id && isWindowOpening(opening)
                 ) ? (
-                  <button className="secondary" onClick={() => selectWindowsOnWall(selectedSurface.id)}>
-                    Select all windows on wall
+                  <button className="secondary" onClick={() => selectWindowsOnWalls([selectedSurface.id])}>
+                    Select windows on wall
                   </button>
                 ) : null}
               </>
@@ -1045,8 +1025,8 @@ function App() {
                   </select>
                 </div>
                 {new Set(selectedWindowOpenings.map((opening) => opening.parentSurfaceId)).size === 1 ? (
-                  <button className="secondary" onClick={() => selectWindowsOnWall(selectedWindowOpenings[0].parentSurfaceId)}>
-                    Select all windows on wall
+                  <button className="secondary" onClick={() => selectWindowsOnWalls([selectedWindowOpenings[0].parentSurfaceId])}>
+                    Select windows on wall
                   </button>
                 ) : null}
                 {selectedWindowOpenings.length > 0 ? (
@@ -1116,20 +1096,10 @@ function App() {
 
         <div className="panel__section">
           <h2>Surfaces</h2>
-          <label className="selection-mode">
-            <span>Add walls to selection</span>
-            <input
-              type="checkbox"
-              checked={surfaceMultiSelect}
-              onChange={(event) => setSurfaceMultiSelect(event.target.checked)}
-            />
-          </label>
+          <p className="selection-help">Click walls in the model or list to add or remove them.</p>
           <div className="selection-actions">
-            <button className="secondary" onClick={selectVisibleExteriorWalls} disabled={visibleSurfaces.length === 0}>
-              Select exterior walls
-            </button>
             <button onClick={clearSurfaceSelection} disabled={selectedKind !== "surface" || selectedSurfaceIds.size === 0}>
-              Clear
+              Clear wall selection
             </button>
           </div>
           <div className="surface-list">
@@ -1137,9 +1107,7 @@ function App() {
               <button
                 key={surface.id}
                 className={selectedKind === "surface" && selectedSurfaceIds.has(surface.id) ? "active" : ""}
-                onClick={(event) =>
-                  selectSurface(surface.id, surfaceMultiSelect || event.ctrlKey || event.metaKey)
-                }
+                onClick={() => selectSurface(surface.id, true)}
               >
                 {surface.id || "Surface"} - {surface.surfaceType}
                 {surface.levelIds.length ? ` - ${getLevelDisplayName(levels, surface.levelIds[0])}` : ""}
